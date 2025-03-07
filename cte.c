@@ -3,13 +3,13 @@
 #include <string.h>
 #include <unistd.h>
 #include <stdio.h>
-#include <signal.h>
-#include <time.h>
+#include <locale.h>
+#include <wchar.h>
 #include <ctype.h>
+#include <wctype.h>
 
 #define MAX_LINES 1000
 #define MAX_LEN 256
-#define AUTO_SAVE_INTERVAL 5
 #define TAB_SPACE 4
 
 char *clipboard = NULL;
@@ -47,11 +47,6 @@ void save_file() {
     fclose(fp);
 }
 
-void auto_save(int sig) {
-    save_file();
-    alarm(AUTO_SAVE_INTERVAL);
-}
-
 void editor() {
     clear();
 
@@ -84,11 +79,39 @@ void editor() {
         mvprintw(LINES - 1, 0, ":%s ", command_buffer);
     }
 
-    int cursor_pos = cursor_x + num_width;
-    if (cursor_pos >= COLS - 1) {
-        cursor_pos = COLS - 1;
+    int cursor_pos = 0;
+    int byte_pos = 0;
+    while (byte_pos < cursor_x) {
+        int char_len = mblen(&lines[cursor_y][byte_pos], MB_CUR_MAX);
+        if (char_len <= 0) break;
+        cursor_pos++;
+        byte_pos += char_len;
     }
-    move(cursor_y - scroll_offset, cursor_pos);
+
+    move(cursor_y - scroll_offset, cursor_pos + num_width);
+}
+
+void dlt_word() {
+    if (cursor_x == 0) {
+        if (cursor_y > 0) {
+            cursor_y--;
+            cursor_x = strlen(lines[cursor_y]);
+            lines[cursor_y] = realloc(lines[cursor_y], strlen(lines[cursor_y]) + strlen(lines[cursor_y + 1]) + 1);
+            strcat(lines[cursor_y], lines[cursor_y + 1]);
+            for (int i = cursor_y + 1; i < num_lines - 1; i++) {
+                lines[i] = lines[i + 1];
+            }
+            lines[num_lines - 1] = NULL;
+            num_lines--;
+        }
+    } else {
+        int i = cursor_x - 1;
+        while (i >= 0 && isspace(lines[cursor_y][i])) i--;
+        while (i >= 0 && !isspace(lines[cursor_y][i])) i--;
+        int new_x = i + 1;
+        memmove(&lines[cursor_y][new_x], &lines[cursor_y][cursor_x], strlen(&lines[cursor_y][cursor_x]) + 1);
+        cursor_x = new_x;
+    }
 }
 
 void handle_i(int ch) {
@@ -96,7 +119,7 @@ void handle_i(int ch) {
 
     if (alt_flag) {
         alt_flag = 0;
-        if (ch == 'u') {
+        if (ch == 'c') {
             command_mode = 1;
             memset(command_buffer, 0, MAX_LEN);
         } else if (ch == 'x') {
@@ -105,11 +128,13 @@ void handle_i(int ch) {
             }
             lines[num_lines - 1] = NULL;
             num_lines--;
+        } else if (ch == 127 || ch == KEY_BACKSPACE) { 
+            dlt_word();
         }
         return;
     }
 
-    if (ch == 27) {
+    if (ch == 27) { // Alt 
         alt_flag = 1;
         return;
     }
@@ -136,78 +161,116 @@ void handle_i(int ch) {
             }
         }
     } else {
-        if (ch == KEY_BACKSPACE || ch == 127) {
-            if (cursor_x > 0) {
-                memmove(&lines[cursor_y][cursor_x - 1], &lines[cursor_y][cursor_x], strlen(&lines[cursor_y][cursor_x]) + 1);
-                cursor_x--;
-            } else if (cursor_y > 0) {
-                char *temp = lines[cursor_y];
-                lines[cursor_y - 1] = realloc(lines[cursor_y - 1], strlen(lines[cursor_y - 1]) + strlen(temp) + 1);
-                strcat(lines[cursor_y - 1], temp);
-                free(lines[cursor_y]);
+        switch (ch) {
+            case KEY_BACKSPACE:
+            case 127:
+                if (cursor_x > 0) {
+                    int char_len = mblen(&lines[cursor_y][cursor_x - 1], MB_CUR_MAX);
+                    if (char_len <= 0) char_len = 1;
+                    memmove(&lines[cursor_y][cursor_x - char_len], &lines[cursor_y][cursor_x], strlen(&lines[cursor_y][cursor_x]) + 1);
+                    cursor_x -= char_len;
+                } else if (cursor_y > 0) {
+                    char *temp = lines[cursor_y];
+                    lines[cursor_y - 1] = realloc(lines[cursor_y - 1], strlen(lines[cursor_y - 1]) + strlen(temp) + 1);
+                    strcat(lines[cursor_y - 1], temp);
+                    free(lines[cursor_y]);
 
-                for (int i = cursor_y; i < num_lines - 1; i++) {
-                    lines[i] = lines[i + 1];
+                    for (int i = cursor_y; i < num_lines - 1; i++) {
+                        lines[i] = lines[i + 1];
+                    }
+                    lines[num_lines - 1] = NULL;
+                    num_lines--;
+                    cursor_y--;
+                    cursor_x = strlen(lines[cursor_y]);
                 }
-                lines[num_lines - 1] = NULL;
-                num_lines--;
-                cursor_y--;
-                cursor_x = strlen(lines[cursor_y]);
-            }
-        } else if (ch == KEY_DC) {
-            if (cursor_x < strlen(lines[cursor_y])) {
-                memmove(&lines[cursor_y][cursor_x], &lines[cursor_y][cursor_x + 1], strlen(&lines[cursor_y][cursor_x]));
-            }
-        } else if (ch == '\n') {
-            if (cursor_x < strlen(lines[cursor_y])) {
-                memmove(&lines[cursor_y + 1], &lines[cursor_y], (num_lines - cursor_y) * sizeof(char *));
-                lines[cursor_y + 1] = strdup(&lines[cursor_y][cursor_x]);
-                lines[cursor_y][cursor_x] = '\0';
-            } else {
-                memmove(&lines[cursor_y + 1], &lines[cursor_y], (num_lines - cursor_y) * sizeof(char *));
-                lines[cursor_y + 1] = strdup("");
-            }
-            num_lines++;
-            cursor_y++;
-            cursor_x = 0;
-        } else if (ch == KEY_UP) {
-            if (cursor_y > 0) cursor_y--;
-        } else if (ch == KEY_DOWN) {
-            if (cursor_y < num_lines - 1) cursor_y++;
-        } else if (ch == KEY_LEFT) {
-            if (cursor_x > 0) cursor_x--;
-        } else if (ch == KEY_RIGHT) {
-            if (cursor_x < strlen(lines[cursor_y])) cursor_x++;
-        } else if (ch == '\t') {
-            int len = strlen(lines[cursor_y]);
-            if (len + TAB_SPACE < MAX_LEN) {
-                lines[cursor_y] = realloc(lines[cursor_y], len + TAB_SPACE + 1);
-                memmove(&lines[cursor_y][cursor_x + TAB_SPACE], &lines[cursor_y][cursor_x], len - cursor_x + 1);
-                for (int i = 0; i < TAB_SPACE; i++) {
-                    lines[cursor_y][cursor_x + i] = ' ';
+                break;
+
+            case KEY_DC:
+                if (cursor_x < strlen(lines[cursor_y])) {
+                    int char_len = mblen(&lines[cursor_y][cursor_x], MB_CUR_MAX);
+                    if (char_len <= 0) char_len = 1;
+                    memmove(&lines[cursor_y][cursor_x], &lines[cursor_y][cursor_x + char_len], strlen(&lines[cursor_y][cursor_x + char_len]) + 1);
                 }
-                cursor_x += TAB_SPACE;
-            }
-        } else if (isprint(ch)) {
-            int len = strlen(lines[cursor_y]);
-            if (len + 1 < MAX_LEN) {
-                lines[cursor_y] = realloc(lines[cursor_y], len + 2);
-                memmove(&lines[cursor_y][cursor_x + 1], &lines[cursor_y][cursor_x], len - cursor_x + 1);
-                lines[cursor_y][cursor_x] = ch;
-                cursor_x++;
-            }
+                break;
+
+            case '\n':
+                if (cursor_x < strlen(lines[cursor_y])) {
+                    memmove(&lines[cursor_y + 1], &lines[cursor_y], (num_lines - cursor_y) * sizeof(char *));
+                    lines[cursor_y + 1] = strdup(&lines[cursor_y][cursor_x]);
+                    lines[cursor_y][cursor_x] = '\0';
+                } else {
+                    memmove(&lines[cursor_y + 1], &lines[cursor_y], (num_lines - cursor_y) * sizeof(char *));
+                    lines[cursor_y + 1] = strdup("");
+                }
+                num_lines++;
+                cursor_y++;
+                cursor_x = 0;
+                break;
+
+            case KEY_UP:
+                if (cursor_y > 0) cursor_y--;
+                break;
+
+            case KEY_DOWN:
+                if (cursor_y < num_lines - 1) cursor_y++;
+                break;
+
+            case KEY_LEFT:
+                if (cursor_x > 0) {
+                    int char_len = mblen(&lines[cursor_y][cursor_x - 1], MB_CUR_MAX);
+                    if (char_len <= 0) char_len = 1;
+                    cursor_x -= char_len;
+                } else if (cursor_y > 0) {
+                    cursor_y--;
+                    cursor_x = strlen(lines[cursor_y]);
+                }
+                break;
+
+            case KEY_RIGHT:
+                if (cursor_x < strlen(lines[cursor_y])) {
+                    int char_len = mblen(&lines[cursor_y][cursor_x], MB_CUR_MAX);
+                    if (char_len <= 0) char_len = 1;
+                    cursor_x += char_len;
+                } else if (cursor_y < num_lines - 1) {
+                    cursor_y++;
+                    cursor_x = 0;
+                }
+                break;
+
+            case '\t':
+                int len = strlen(lines[cursor_y]);
+                if (len + TAB_SPACE < MAX_LEN) {
+                    lines[cursor_y] = realloc(lines[cursor_y], len + TAB_SPACE + 1);
+                    memmove(&lines[cursor_y][cursor_x + TAB_SPACE], &lines[cursor_y][cursor_x], len - cursor_x + 1);
+                    for (int i = 0; i < TAB_SPACE; i++) {
+                        lines[cursor_y][cursor_x + i] = ' ';
+                    }
+                    cursor_x += TAB_SPACE;
+                }
+                break;
+
+            default:
+                if (ch >= 32 && ch <= 126 || ch >= 128) { 
+                    int len = strlen(lines[cursor_y]);
+                    if (len + 1 < MAX_LEN) {
+                        lines[cursor_y] = realloc(lines[cursor_y], len + 2);
+                        memmove(&lines[cursor_y][cursor_x + 1], &lines[cursor_y][cursor_x], len - cursor_x + 1);
+                        lines[cursor_y][cursor_x] = ch;
+                        cursor_x++;
+                    }
+                }
+                break;
         }
     }
 }
 
 int main(int argc, char *argv[]) {
+    setlocale(LC_ALL, ""); 
     initscr();
     raw();
     keypad(stdscr, TRUE);
     noecho();
     timeout(100);
-    signal(SIGALRM, auto_save);
-    alarm(AUTO_SAVE_INTERVAL);
 
     if (argc > 1) {
         load_file(argv[1]);
