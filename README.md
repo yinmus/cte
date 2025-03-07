@@ -4,9 +4,13 @@
 
 **Команды:**
 
-[Alt + U] - Command line
+[Alt + C] - Command line
 
 [Alt + X] - Cut line
+
+[Alt + BackSpace] - Delete Word
+
+
 
 **Использование:**
 ```bash
